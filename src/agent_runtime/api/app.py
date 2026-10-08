@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -64,6 +65,10 @@ class MessageOut(BaseModel):
 class HistoryResponse(BaseModel):
     session_id: str
     messages: list[MessageOut]
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[str]
 
 
 class RecoveryResponse(BaseModel):
@@ -140,6 +145,17 @@ def create_app(
         session_id = uuid.uuid4().hex[:16]
         await make_runner().ensure_session(session_id)
         return CreateSessionResponse(session_id=session_id, tools=tools.names())
+
+    @app.get("/sessions", response_model=SessionListResponse)
+    async def list_sessions() -> SessionListResponse:
+        """列出磁盘上已有的会话。
+
+        直接来自目录扫描，不走内存索引——内存里那份重启就没了，
+        而这个接口的意义正是「进程重启后还能找回之前的会话」。
+        """
+
+        session_ids = await asyncio.to_thread(store.list_sessions)
+        return SessionListResponse(sessions=session_ids)
 
     @app.get("/sessions/{session_id}/messages", response_model=HistoryResponse)
     async def get_messages(session_id: str) -> HistoryResponse:
@@ -219,7 +235,10 @@ def _encode(event: LoopEvent) -> str:
     if isinstance(event, TextChunk):
         return _sse("text", {"text": event.text})
     if isinstance(event, ToolStarted):
-        return _sse("tool_started", {"call_id": event.call_id, "name": event.name})
+        return _sse(
+            "tool_started",
+            {"call_id": event.call_id, "name": event.name, "arguments": event.arguments},
+        )
     if isinstance(event, ToolFinished):
         return _sse(
             "tool_finished",

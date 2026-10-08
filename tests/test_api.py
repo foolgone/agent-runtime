@@ -81,6 +81,25 @@ async def test_turn_streams_sse_events(client: httpx.AsyncClient) -> None:
     assert done["unfinished"] == []
 
 
+async def test_tool_started_carries_arguments(client: httpx.AsyncClient) -> None:
+    """前端要拿参数去渲染工具卡片，缺了就只能显示一个光秃秃的工具名。"""
+
+    session_id = await start_session(client)
+    response = await client.post(f"/sessions/{session_id}/messages", json={"input": "回声"})
+    events = dict(await parse_sse(response))
+
+    started = events["tool_started"]
+    assert started["name"] == "echo"
+    assert json.loads(started["arguments"]) == {"text": "pong"}
+
+    # 发出去的和记账的是同一份，不然前端显示的和日志里存的对不上
+    body = (await client.get(f"/sessions/{session_id}/messages")).json()
+    recorded = next(
+        call for m in body["messages"] for call in m["tool_calls"] if call["id"] == started["call_id"]
+    )
+    assert recorded["arguments"] == started["arguments"]
+
+
 async def test_history_after_turn(client: httpx.AsyncClient) -> None:
     session_id = await start_session(client)
     await parse_sse(await client.post(f"/sessions/{session_id}/messages", json={"input": "hi"}))
@@ -217,3 +236,26 @@ async def test_read_only_endpoints_survive_broken_model_config(
 
     assert history.status_code == 200
     assert recovery.status_code == 200
+
+
+async def test_list_sessions_includes_created_ones(client: httpx.AsyncClient) -> None:
+    """会话列表直接扫磁盘，所以进程重启后依然能列出——这是它存在的理由。"""
+
+    assert (await client.get("/sessions")).json()["sessions"] == []
+
+    first = await start_session(client)
+    second = await start_session(client)
+
+    sessions = (await client.get("/sessions")).json()["sessions"]
+    assert set(sessions) == {first, second}
+    assert sessions == sorted(sessions)
+
+
+async def test_list_sessions_does_not_build_a_provider(
+    real_provider_client: tuple[httpx.AsyncClient, list[int]],
+) -> None:
+    client, built = real_provider_client
+    await start_session(client)
+
+    assert (await client.get("/sessions")).status_code == 200
+    assert built == []
