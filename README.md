@@ -138,6 +138,64 @@ agent-runtime-serve --port 8000            # 访问 http://127.0.0.1:8000/
 
 细节见 [web/README.md](web/README.md)。
 
+## 部署
+
+一个镜像，界面和 API 都在里面。`Dockerfile` 分两段：先用 Node 构建 `web/dist`，
+再装 Python 包并把产物拷进去。
+
+### 先在本机验证镜像
+
+```bash
+docker build -t agent-runtime .
+docker run --rm -p 8000:8000 \
+  -e AGENT_MODEL=gpt-4o-mini \
+  -e AGENT_API_KEY=sk-... \
+  -v "$PWD/.data/docker:/data" \
+  agent-runtime
+# 打开 http://127.0.0.1:8000/
+```
+
+`-v` 那行是关键：不挂卷也能跑，只是容器一换会话就全没了 ——
+而这个项目的核心就是「状态只存在于日志里」。
+
+### 部到 Fly.io
+
+```bash
+flyctl apps create <全局唯一的名字>     # 再把 fly.toml 里的 app 改成同名
+flyctl volumes create agent_data --region nrt --size 1
+flyctl secrets set AGENT_API_KEY=sk-...
+flyctl deploy
+```
+
+顺序不能乱：`AGENT_API_KEY` 是必填项，`Settings.from_env()` 在启动时就会校验。
+先 deploy 再设密钥的话，容器会起不来然后被健康检查判死，反复重启。
+
+密钥走 `fly secrets`，不进仓库也不是 `[env]` —— 那里是明文，会跟着 fly.toml 进 git。
+
+卷要建在 `primary_region` 同一个 region，否则挂不上。
+
+### 为什么不能部到 Vercel / serverless
+
+**会话状态 = 磁盘上那份 append-only 事件日志。** 崩溃恢复、幂等、「已受理、结果未知」
+全都从它推出来。serverless 给不了这个：
+
+- 函数只有 `/tmp`，而且**每次冷启动是新实例**——日志写进去下一次就没了；
+- 存储一没，这个项目最值得看的那部分直接消失，只剩一个会聊天的空壳；
+- SSE 是长连接，函数有执行时长上限，流会被掐；
+- app-scoped provider 连接池在「每次冷启动重建」的前提下没有意义。
+
+Vercel 适合无状态、短请求、能随便水平扩的东西。这个项目三条全反：**有状态、长连接、单实例**。
+实测过：纯静态部上去的结果是前端能打开、所有按钮都 404。
+
+### 已知限制
+
+| 限制 | 说明 |
+|:--|:--|
+| **不能水平扩** | Fly 的卷一次只挂一台机器；多开一台就是另一个空卷，用户会在实例间被负载均衡，看到会话列表忽有忽无。`EventStore` 还按会话缓存了 seq，两个进程往同一文件追加会撞号。要扩得先让状态离开本地磁盘。 |
+| Fly 代理有 idle timeout | 约 60s。模型一直不吐字的话连接会被切。正常对话不会碰到，慢模型要注意。 |
+| 卷要自己备份 | 日志是唯一的事实源，丢了就是丢了。 |
+| 流程内不降权 | Fly 的卷挂进来是 root 属主，非 root 进程写不进去。降权要入口脚本先 chown，详见 Dockerfile 里的注释。 |
+
 ## 配置
 
 全部通过环境变量，前缀 `AGENT_`。见 `.env.example`。
