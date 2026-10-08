@@ -171,6 +171,18 @@ python tools/smoke/fake_openai_server.py 8731 &
 python tools/smoke/smoke_e2e.py 8731
 ```
 
+## 压测
+
+```bash
+python -m bench.run                                # 几秒
+python -m bench.run --full --out bench/RESULTS.md  # 出报告
+```
+
+**模型调用全部 stub 掉，延迟是可控参数。** 拿真模型压测量到的是上游网络，
+跟这个仓库无关；扣掉固定的模型延迟，剩下的才是运行时自身的开销。
+
+结果见 [bench/RESULTS.md](bench/RESULTS.md)，方法与口径见 [bench/README.md](bench/README.md)。
+
 ## 结构
 
 ```
@@ -181,6 +193,7 @@ src/agent_runtime/
 ├── loop/       「模型 -> 工具 -> 模型」循环
 ├── api/        HTTP / SSE
 └── cli.py      命令行入口
+bench/          压测：统计、stub provider、场景、报告生成
 docs/adr/       设计取舍记录
 tools/smoke/    端到端冒烟
 ```

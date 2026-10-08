@@ -125,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(markdown, encoding="utf-8")
+        # newline="\n"：不显式指定的话，Windows 上 write_text 会把 \n 翻成 \r\n，
+        # 和 .gitattributes 里的 eol=lf 打架，每次重跑报告都产生一个假的整文件 diff。
+        args.out.write_text(markdown, encoding="utf-8", newline="\n")
         print(f"报告已写入 {args.out}")
     else:
         sys.stdout.write("\n" + markdown)
