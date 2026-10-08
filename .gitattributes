@@ -1,0 +1,5 @@
+# 统一按 LF 存盘。Windows 上编辑产生的 CRLF 不该混进提交。
+* text=auto eol=lf
+
+# 示例文件保留原样，别被当成二进制
+*.example text
