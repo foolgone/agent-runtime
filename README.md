@@ -1,5 +1,7 @@
 # agent-runtime
 
+[![CI](https://github.com/foolgone/agent-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/foolgone/agent-runtime/actions/workflows/ci.yml)
+
 可恢复、幂等的 Agent 任务运行时。
 
 模型 API 只提供「无状态的一次请求」。真实 Agent 需要的是：多轮工具调用、进程崩了能接着跑、

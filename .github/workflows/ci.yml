@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一个分支连续 push 时，取消上一次还没跑完的，省排队时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 静态检查只需要跑一遍，和 Python 版本无关
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy
+        run: mypy
+
+  # 测试跑矩阵，覆盖声明支持的最低版本和当前版本
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -e ".[dev]"
+
+      - name: pytest
+        run: pytest -q
+
+      # 单元测试用的是打桩 provider，这里再走一遍真实 HTTP：
+      # 真发请求、真解析 SSE、真写磁盘、真制造一次崩溃再恢复
+      - name: 端到端冒烟
+        run: |
+          python tools/smoke/fake_openai_server.py 8731 > /tmp/fake-llm.log 2>&1 &
+          sleep 2
+          python tools/smoke/smoke_e2e.py 8731
+
+      - name: 冒烟失败时打印假服务端日志
+        if: failure()
+        run: cat /tmp/fake-llm.log
