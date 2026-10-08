@@ -259,3 +259,43 @@ async def test_list_sessions_does_not_build_a_provider(
 
     assert (await client.get("/sessions")).status_code == 200
     assert built == []
+
+
+# --------------------------------------------------------------------------- 前端托管
+
+
+async def test_frontend_is_served_when_built(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """构建产物挂在 / 上，且不挡 API 路由。"""
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>ok</title>", encoding="utf-8")
+
+    app = create_app(replace(settings, web_dir=dist), registry=build_default_registry())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        root = await client.get("/")
+        health = await client.get("/healthz")
+
+    assert root.status_code == 200
+    assert "<title>ok</title>" in root.text
+    # API 路由先注册，没有被 StaticFiles 吃掉
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+
+
+async def test_missing_frontend_build_does_not_break_the_api(settings: Settings) -> None:
+    """前端没 build 时后端照常起 —— 只是 / 返回 404，而不是整个进程起不来。"""
+
+    app = create_app(settings, registry=build_default_registry())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        root = await client.get("/")
+        health = await client.get("/healthz")
+
+    assert health.status_code == 200
+    assert root.status_code == 404

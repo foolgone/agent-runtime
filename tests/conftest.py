@@ -90,6 +90,9 @@ def settings(tmp_path: Path) -> Settings:
         api_key="test-key",
         base_url="http://localhost:9/v1",
         data_dir=tmp_path / "data",
+        # 显式不托管前端：否则会挂上仓库里真实的 web/dist，
+        # 测试结果就取决于本地有没有 build 过。
+        web_dir=None,
     )
 
 

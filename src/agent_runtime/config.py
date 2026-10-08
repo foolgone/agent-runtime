@@ -32,6 +32,8 @@ class Settings:
     max_tool_rounds: int = 8
     request_timeout_s: float = 120.0
     tool_timeout_s: float = 30.0
+    # 前端构建产物目录。``None`` 表示不托管前端（只当 API 用，比如跑测试）。
+    web_dir: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -67,10 +69,30 @@ class Settings:
             max_tool_rounds=_positive_int(source, "AGENT_MAX_TOOL_ROUNDS", 8),
             request_timeout_s=_positive_float(source, "AGENT_REQUEST_TIMEOUT_S", 120.0),
             tool_timeout_s=_positive_float(source, "AGENT_TOOL_TIMEOUT_S", 30.0),
+            web_dir=_web_dir(source),
         )
 
 
+def _web_dir(env: Mapping[str, str]) -> Path | None:
+    """前端构建产物在哪。
+
+    默认取仓库里的 ``web/dist``，路径由本文件的位置推出来 ——
+    这样从任意工作目录启动都能找到，不必先 ``cd`` 到仓库根。
+
+    ``AGENT_WEB_DIR`` 显式指定时以它为准；指定成空串表示不托管前端。
+    目录不存在不算错误：后端本来就要能单独跑（只当 API、或者前端还没 build）。
+    """
+
+    raw = env.get("AGENT_WEB_DIR")
+    if raw is not None:
+        stripped = raw.strip()
+        return Path(stripped) if stripped else None
+    # config.py -> agent_runtime -> src -> 仓库根
+    return Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
 def _positive_int(env: Mapping[str, str], key: str, default: int) -> int:
+
     raw = env.get(key)
     if raw is None or not raw.strip():
         return default

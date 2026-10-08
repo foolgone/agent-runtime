@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent_runtime.config import Settings
@@ -228,7 +229,26 @@ def create_app(
             event_stream(), media_type="text/event-stream", headers=SSE_HEADERS
         )
 
+    _mount_frontend(app, settings)
+
     return app
+
+
+def _mount_frontend(app: FastAPI, settings: Settings) -> None:
+    """把前端构建产物挂到 ``/``。
+
+    必须**在所有 API 路由注册之后**才挂：StaticFiles 在 ``/`` 上是兜底的，
+    挂在前面会把 ``/sessions`` 一起吃掉。
+    ``html=True`` 让 ``/`` 直接返回 index.html。
+
+    找不到 dist 就什么都不做 —— 后端要能单独跑（跑测试、只当 API 用、
+    或者前端还没 build）。这时 ``/`` 返回 404，而不是让整个进程起不来。
+    """
+
+    dist = settings.web_dir
+    if dist is None or not (dist / "index.html").is_file():
+        return
+    app.mount("/", StaticFiles(directory=dist, html=True), name="web")
 
 
 def _encode(event: LoopEvent) -> str:
