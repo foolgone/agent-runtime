@@ -63,3 +63,36 @@ jobs:
       - name: 冒烟失败时打印假服务端日志
         if: failure()
         run: cat /tmp/fake-llm.log
+
+  # 前端独立一个 job：Node 侧的问题不该让 Python 矩阵重跑
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # 用 ci 而不是 install：锁文件跟 package.json 对不上时直接失败，
+      # 不静默地把版本装成别的样子
+      - name: 安装依赖
+        run: npm ci
+
+      - name: eslint
+        run: npm run lint
+
+      - name: tsc
+        run: npm run typecheck
+
+      - name: vitest
+        run: npm test
+
+      # 构建也要进 CI：类型过了、测试过了，不代表能打包出来
+      - name: 构建
+        run: npm run build
