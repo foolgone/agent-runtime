@@ -1,0 +1,63 @@
+# Fly.io 部署配置。
+#
+# 先说清楚为什么不是 Vercel：这个后端是有状态的。会话状态 = 磁盘上那份
+# append-only 事件日志，崩溃恢复、幂等、未收尾调用全都靠它。Vercel 的
+# 函数只有 /tmp，而且每次冷启动是新实例，日志写进去下一次就没了 ——
+# 部署上去会得到一个「前端能打开、所有按钮都 404」的壳。
+#
+# 这里需要的就三样：常驻进程（SSE 长连接）、持久卷（日志落盘）、单实例（见下）。
+
+app = "agent-runtime"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AGENT_PROVIDER = "openai"
+  # 换成你要用的模型。密钥不要写在这里，用 fly secrets set
+  AGENT_MODEL = "gpt-4o-mini"
+  AGENT_DATA_DIR = "/data"
+  AGENT_WEB_DIR = "/app/web/dist"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+
+  # 不缩到零：机器一停，正在进行的对话流就断了，而且冷启动要重新读日志建索引。
+  # 这是个演示/自用规模的服务，一直开着成本也就几美分一天。
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # 只能是一台。两个原因，都不是性能问题而是正确性问题：
+  #
+  #  1. Fly 的卷一次只能挂到一台机器上。多开一台就是另一个空卷，
+  #     用户在两个实例之间被负载均衡，会看到会话列表忽有忽无。
+  #  2. EventStore 按会话缓存了 seq。两个进程往同一个文件追加会撞号。
+  #
+  # 也就是说这个服务目前**不能水平扩**。要扩得先让状态离开本地磁盘。
+  max_machines_running = 1
+
+  [http_service.concurrency]
+    # 按连接数而不是请求数计。SSE 是一条连接从头挂到尾，
+    # 用 "requests" 会以为机器很闲，实际上连接已经占满了。
+    type = "connections"
+    soft_limit = 100
+    hard_limit = 200
+
+[[mounts]]
+  source = "agent_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[checks.health]
+  type = "http"
+  port = 8000
+  path = "/healthz"
+  interval = "15s"
+  timeout = "3s"
+  grace_period = "10s"

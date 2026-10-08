@@ -1,0 +1,23 @@
+# Dockerfile 只 COPY pyproject.toml / README.md / src/ / web/，
+# 所以这里唯一的作用是别把构建上下文传得太大。
+# 只列体积大的东西；文档、压测、测试脚本都是几十 KB，不值得为它们冒险写通配符。
+
+# 版本库
+.git
+.github
+
+# Python 环境与缓存。这仨在仓库根，不存在同名子目录，怎么匹配都对
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/__pycache__/
+**/*.egg-info/
+
+# 事件日志：运行数据，不进镜像（镜像里那份只会是过期的）
+.data
+
+# 前端：node_modules 由 npm ci 重装，dist 由阶段 1 重新构建。
+# 不排 node_modules 的话构建上下文会大出一个数量级。
+web/node_modules
+web/dist
