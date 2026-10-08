@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -129,3 +131,89 @@ async def test_sse_frames_are_well_formed(client: httpx.AsyncClient) -> None:
 
     assert "text/event-stream" in response.headers["content-type"]
     assert response.headers["x-accel-buffering"] == "no"
+
+
+# --------------------------------------------------------------------------- provider 生命周期
+
+
+@pytest.fixture
+async def real_provider_client(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[httpx.AsyncClient, list[int]]]:
+    """走「自己造 provider」的路径，并数它被造了几次。
+
+    别的用例都注入假 provider，绕过了这条路径——而这里恰恰是要测的：
+    provider 是每请求一个还是全局一个。
+    """
+
+    import agent_runtime.api.app as app_module
+
+    built: list[int] = []
+
+    def counting_build(active_settings: Settings):
+        built.append(1)
+        return ScriptedProvider(
+            [
+                tool_call_script("c1", "echo", '{"text":"pong"}', preamble="让我查一下。"),
+                text_script("回显完成"),
+            ]
+        )
+
+    monkeypatch.setattr(app_module, "build_provider", counting_build)
+    app = create_app(settings, registry=build_default_registry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as active:
+        yield active, built
+
+
+async def test_provider_is_built_once_not_per_request(
+    real_provider_client: tuple[httpx.AsyncClient, list[int]],
+) -> None:
+    """每个请求造一个 provider，就会一起造一个 httpx.AsyncClient。
+
+    连接池的意义是不重建；每请求一个 provider 等于每轮对话重新握手，
+    且建出来的客户端没人关。
+    """
+
+    client, built = real_provider_client
+    session_id = await start_session(client)
+    await parse_sse(await client.post(f"/sessions/{session_id}/messages", json={"input": "回声"}))
+    await client.get(f"/sessions/{session_id}/messages")
+    await client.get(f"/sessions/{session_id}/recovery")
+
+    assert len(built) == 1, f"provider 被构造了 {len(built)} 次，应当是 1 次"
+
+
+async def test_read_only_endpoints_never_build_a_provider(
+    real_provider_client: tuple[httpx.AsyncClient, list[int]],
+) -> None:
+    """查历史、查恢复不碰模型，就不该建 provider，也不该因为模型配置坏了而失败。"""
+
+    client, built = real_provider_client
+    session_id = await start_session(client)
+
+    assert (await client.get(f"/sessions/{session_id}/messages")).status_code == 200
+    assert (await client.get(f"/sessions/{session_id}/recovery")).status_code == 200
+    assert built == []
+
+
+async def test_read_only_endpoints_survive_broken_model_config(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """模型配置写错，只读接口照样能用。
+
+    这是上面那条的实际后果，单独测一遍是因为它才是用户能感知到的差别：
+    查询历史不该因为 AGENT_PROVIDER 拼错而 500。
+    """
+
+    broken = replace(settings, provider="no-such-provider")
+    app = create_app(broken, registry=build_default_registry(), notes_dir=tmp_path)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = await start_session(client)
+        history = await client.get(f"/sessions/{session_id}/messages")
+        recovery = await client.get(f"/sessions/{session_id}/recovery")
+
+    assert history.status_code == 200
+    assert recovery.status_code == 200

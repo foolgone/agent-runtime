@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ from agent_runtime.errors import (
     ProviderError,
     SessionNotFoundError,
 )
-from agent_runtime.llm.registry import build_provider
+from agent_runtime.llm.registry import LazyProvider, build_provider
 from agent_runtime.loop.runner import (
     AgentRunner,
     LoopEvent,
@@ -85,18 +86,38 @@ def create_app(
     ``provider`` 可以注入，测试用假的 provider 就能跑完整条链路，不需要真实模型。
     """
 
-    app = FastAPI(title="agent-runtime", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(active: FastAPI) -> AsyncIterator[None]:
+        yield
+        # provider 是整个进程共用的那一个，谁建谁关。关在这里而不是每个请求里，
+        # 否则每轮对话都会把连接池拆掉重建，而连接池的意义就是别重建。
+        #
+        # ``aclose`` 不在 Provider 协议里（实现者只需提供 stream），所以是可选的：
+        # 假 provider 通常没有连接可关。有就关，没有就算了。
+        close = getattr(active.state.provider, "aclose", None)
+        if close is not None:
+            await close()
+
+    app = FastAPI(title="agent-runtime", version="0.1.0", lifespan=lifespan)
 
     store = EventStore(settings.data_dir / "sessions")
     tools = registry if registry is not None else build_default_registry(notes_dir=notes_dir)
+
+    # 全应用一个 provider，不是每个请求一个。
+    # 每个请求建一个 —— 这里是之前的样子 —— 意味着每轮对话都要重新握手一次，
+    # 且建出来的 httpx.AsyncClient 没人关。
+    # 包一层 LazyProvider：只读接口不该为了查一条历史去建连接池，
+    # 也不该因为模型配置写错而跟着失败。
     app.state.settings = settings
     app.state.store = store
     app.state.registry = tools
+    app.state.provider = (
+        provider if provider is not None else LazyProvider(lambda: build_provider(settings))
+    )
 
     def make_runner() -> AgentRunner:
-        active_provider = provider if provider is not None else build_provider(settings)
         return AgentRunner(
-            provider=active_provider,
+            provider=app.state.provider,
             store=store,
             registry=tools,
             max_tool_rounds=settings.max_tool_rounds,

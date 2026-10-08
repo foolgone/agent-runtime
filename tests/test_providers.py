@@ -13,8 +13,16 @@ import pytest
 
 from agent_runtime.errors import ProviderError
 from agent_runtime.llm.anthropic_compat import AnthropicCompatProvider, encode_messages
-from agent_runtime.llm.base import ChatMessage, ToolCall, ToolSchema, collect
+from agent_runtime.llm.base import (
+    ChatMessage,
+    Completed,
+    TextDelta,
+    ToolCall,
+    ToolSchema,
+    collect,
+)
 from agent_runtime.llm.openai_compat import OpenAICompatProvider
+from agent_runtime.llm.registry import LazyProvider
 
 SSE_HEADERS = {"content-type": "text/event-stream"}
 
@@ -272,3 +280,92 @@ async def test_anthropic_transport_failure_becomes_provider_error() -> None:
     )
     with pytest.raises(ProviderError, match="request failed"):
         await collect(provider.stream(messages=[ChatMessage("user", "hi")]))
+
+
+# --------------------------------------------------------------------------- 懒构造
+
+
+class _ClosableStub:
+    """记账用的假 provider：记被构造、被流过、被关过。"""
+
+    name = "stub"
+
+    def __init__(self, log: list[str]) -> None:
+        self._log = log
+        self._log.append("built")
+
+    async def stream(self, *, messages, tools=(), system=None):
+        self._log.append("streamed")
+        yield TextDelta("ok")
+        yield Completed(stop_reason="stop")
+
+    async def aclose(self) -> None:
+        self._log.append("closed")
+
+
+async def test_lazy_provider_does_not_build_until_first_stream() -> None:
+    log: list[str] = []
+    lazy = LazyProvider(lambda: _ClosableStub(log))
+
+    assert log == []
+    assert lazy.name == "lazy"
+    assert not lazy.built
+
+    await collect(lazy.stream(messages=[ChatMessage("user", "hi")]))
+
+    assert log == ["built", "streamed"]
+    assert lazy.built
+    assert lazy.name == "stub"
+
+
+async def test_lazy_provider_builds_only_once_across_streams() -> None:
+    """连接池靠复用才成立；构造两次就等于池子白建了。"""
+
+    log: list[str] = []
+    lazy = LazyProvider(lambda: _ClosableStub(log))
+
+    for _ in range(3):
+        await collect(lazy.stream(messages=[ChatMessage("user", "hi")]))
+
+    assert log.count("built") == 1
+    assert log.count("streamed") == 3
+
+
+async def test_lazy_provider_aclose_is_noop_when_never_built() -> None:
+    log: list[str] = []
+    lazy = LazyProvider(lambda: _ClosableStub(log))
+
+    await lazy.aclose()
+
+    assert log == []
+
+
+async def test_lazy_provider_aclose_forwards_to_inner() -> None:
+    """关不关得动两次是底下那个 provider 的事，这层只负责转发。
+
+    真实实现自己是幂等的（``OpenAICompatProvider.aclose`` 关完把 ``_client`` 置空），
+    所以这里不额外加一层状态去挡。
+    """
+
+    log: list[str] = []
+    lazy = LazyProvider(lambda: _ClosableStub(log))
+    await collect(lazy.stream(messages=[ChatMessage("user", "hi")]))
+
+    await lazy.aclose()
+
+    assert log == ["built", "streamed", "closed"]
+
+
+async def test_lazy_provider_tolerates_inner_without_aclose() -> None:
+    """``aclose`` 不在 Provider 协议里，实现者可以没有。"""
+
+    class NoClose:
+        name = "stub"
+
+        async def stream(self, *, messages, tools=(), system=None):
+            yield Completed(stop_reason="stop")
+
+    lazy = LazyProvider(NoClose)
+    await collect(lazy.stream(messages=[ChatMessage("user", "hi")]))
+
+    await lazy.aclose()  # 不该抛
